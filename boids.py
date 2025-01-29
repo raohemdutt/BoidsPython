@@ -7,13 +7,16 @@ import pygame_gui
 # Color constants
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
+GREEN = (0, 255, 0)
+RED = (255, 0, 0)
+BLUE = (0, 0, 255)
 
 # Window Parameters
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 
 # Parameters
-NUM_BOIDS = 300
+NUM_BOIDS = 15
 BOID_SIZE = 10
 SPEED = 3
 MAX_FORCE = 0.3
@@ -29,6 +32,9 @@ ALIGNMENT_RADIUS = 50
 
 COHESION = 1
 COHESION_RADIUS = 80
+
+PREDATOR_RADIUS = 100
+FOOD_POS = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 
 
 class Simulation:
@@ -57,6 +63,8 @@ class Simulation:
 
             self.boids.append(Boid(self, position))
         
+        self.predators = [Predator(self, (randint(0, SCREEN_WIDTH), randint(0, SCREEN_HEIGHT)))]
+
         self.manager = pygame_gui.UIManager((SCREEN_WIDTH, SCREEN_HEIGHT), 'theme.json')
 
         self.separation_slider = pygame_gui.elements.UIHorizontalSlider(
@@ -101,14 +109,34 @@ class Simulation:
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 self.running = False
+            elif event.type == pg.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left click adds a boid
+                    self.boids.append(Boid(self, event.pos))
+                    print(f"Added a boid at {event.pos}. Total boids: {len(self.boids)}")
+            elif event.type == pg.KEYDOWN:
+                if event.key == pg.K_p:  # Press 'P' to add a predator
+                    position = (randint(0, SCREEN_WIDTH), randint(0, SCREEN_HEIGHT))
+                    self.predators.append(Predator(self, position))
+                    print(f"Added a predator at {position}. Total predators: {len(self.predators)}")
+                elif event.key == pg.K_r:  # Press 'R' to remove the nearest boid
+                    mouse_pos = pg.mouse.get_pos()
+                    initial_count = len(self.boids)
+                    self.boids = [boid for boid in self.boids if boid.pos.distance_to(mouse_pos) > BOID_SIZE * 2]
+                    removed_count = initial_count - len(self.boids)
+                    if removed_count > 0:
+                        print(f"Removed {removed_count} boid(s). Total boids: {len(self.boids)}")
+
 
     def draw(self):
         # Empty the last screen
         self.screen.fill(BLACK)
+        pg.draw.circle(self.screen, BLUE, FOOD_POS, 10)  # Draw food source
 
         # Draw all boids
         for boid in self.boids:
             boid.draw(self.screen)
+        for predator in self.predators:
+            predator.draw(self.screen)
 
         # Update the screen
         pg.display.update()
@@ -117,8 +145,10 @@ class Simulation:
         """
         Method for going one step in the simulation
         """
+        mouse_pos = pg.mouse.get_pos()  # Get the current mouse position
+
         for boid in self.boids:
-            boid.update()
+            boid.update(mouse_pos)
 
     def run(self):
         """
@@ -174,8 +204,10 @@ class PhysicsObjet:
         # Reset acceleration
         self.acc *= 0
 
+
         # Simplistic surface friction
         self.vel *= self.friction
+        self.update_energy()
 
         # wrap around the edges of the screen
         if self.pos.x > self.simulation.screen_rect.w:
@@ -203,8 +235,11 @@ class Boid(PhysicsObjet):
         self.target = pg.math.Vector2(0, 0)
         self.future_loc = pg.math.Vector2(0, 0)
         self.theta = uniform(-math.pi, math.pi)
+        
+        self.energy = 100  # Energy for boid
 
-    def update(self):
+
+    def update(self, mouse_pos):
         """
         Updates the acceleration of the boid by adding together the different forces that acts on it
         """
@@ -212,9 +247,39 @@ class Boid(PhysicsObjet):
         self.acc += self.separation() * SEPARATION  # separation force scaled with a control parameter
         self.acc += self.alignment() * ALIGNMENT  # alignment force scaled with a control parameter
         self.acc += self.cohesion() * COHESION  # cohesion force scaled with a control parameter
+        self.acc += self.avoid_predators()
+        self.acc += self.mouse_force(mouse_pos)  # Mouse attraction force
 
         # move by calling super
         super().update()
+    
+    def mouse_force(self, mouse_pos):
+        """
+        Calculate the force to move the boid toward the mouse cursor.
+        """
+        force = pg.math.Vector2(mouse_pos) - self.pos
+        if force.length() > 0:
+            force = force.normalize() * self.max_force
+        return force
+
+    def avoid_predators(self):
+        force = pg.math.Vector2(0, 0)
+        for predator in self.simulation.predators:
+            distance = self.pos.distance_to(predator.pos)
+            if distance < PREDATOR_RADIUS:
+                force += (self.pos - predator.pos) / distance  # Move away from predator
+        if force.length() > 0:
+            force = force.normalize() * self.max_force
+        return force
+
+    def update_energy(self):
+        self.energy -= 0.1
+        if self.pos.distance_to(FOOD_POS) < 20:
+            self.energy = min(self.energy + 1, 100)
+        if self.energy <= 0:
+            self.speed = SPEED / 2
+        else:
+            self.speed = SPEED
 
     def separation(self):
         """
@@ -382,6 +447,46 @@ class Boid(PhysicsObjet):
         # Draw
         pg.draw.polygon(screen, WHITE, [(x1, y1), (x2, y2), (x0, y0)])
 
+class Predator:
+    def __init__(self, simulation, position):
+        self.simulation = simulation
+        self.pos = pg.math.Vector2(position)
+        self.vel = pg.math.Vector2(uniform(-2, 2), uniform(-2, 2))
+        self.acc = pg.math.Vector2(0, 0)
+        self.speed = SPEED * 1.5
+
+    def update(self):
+        # Find the closest boid
+        closest_boid = min(self.simulation.boids, key=lambda b: self.pos.distance_to(b.pos), default=None)
+        if closest_boid:
+            # Move toward the closest boid
+            desired = (closest_boid.pos - self.pos).normalize() * self.speed
+            self.acc = desired - self.vel
+
+        # Update velocity and position
+        self.vel += self.acc
+        if self.vel.length() > self.speed:
+            self.vel.scale_to_length(self.speed)
+        self.pos += self.vel
+
+        # Reset acceleration
+        self.acc *= 0
+
+        # Wrap around screen edges
+        self.wrap_around_screen()
+
+    def wrap_around_screen(self):
+        if self.pos.x > SCREEN_WIDTH:
+            self.pos.x = 0
+        elif self.pos.x < 0:
+            self.pos.x = SCREEN_WIDTH
+        if self.pos.y > SCREEN_HEIGHT:
+            self.pos.y = 0
+        elif self.pos.y < 0:
+            self.pos.y = SCREEN_HEIGHT
+
+    def draw(self, screen):
+        pg.draw.circle(screen, RED, (int(self.pos.x), int(self.pos.y)), BOID_SIZE + 5)
 
 # Helper functions
 def remap(n, start1, stop1, start2, stop2):
